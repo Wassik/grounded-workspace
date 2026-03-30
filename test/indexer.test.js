@@ -17,11 +17,18 @@ import {
 import {
   applyCliDefaultsToQuery,
   applyConfiguredThemeDefaults,
+  applyProfileDefaults,
   applyOutputDefaultsToQuery,
+  formatAskOutput,
+  formatProfilesOutput,
   loadEnvDefaults,
   loadThemeConfig,
   loadUserDefaults,
+  listProfiles,
   parseCliOptions,
+  resolveColorMode,
+  resolveOutputFormat,
+  selectCommandDefaults,
   resolveThemeAliasesInQuery,
 } from "../src/cli.js";
 
@@ -55,7 +62,12 @@ test("parseCliOptions extracts the json flag and positional args", () => {
   const parsed = parseCliOptions([
     "/tmp/workspace",
     "saved index",
-    "--json",
+    "--profile",
+    "docs_bundle",
+    "--format",
+    "json",
+    "--color",
+    "always",
     "--explain",
     "terse",
     "--excerpt",
@@ -66,13 +78,24 @@ test("parseCliOptions extracts the json flag and positional args", () => {
     "pill",
   ]);
   assert.equal(parsed.json, true);
+  assert.equal(parsed.format, "json");
   assert.deepEqual(parsed.positionalArgs, ["/tmp/workspace", "saved index"]);
   assert.deepEqual(parsed.defaults, {
+    profile: "docs_bundle",
+    format: "json",
+    color: "always",
     explain: "terse",
     excerpt: "highlighted",
     highlight: "tags",
     theme: "pill",
   });
+});
+
+test("parseCliOptions accepts markdown and html output formats", () => {
+  assert.equal(parseCliOptions(["--format", "markdown"]).format, "markdown");
+  assert.equal(parseCliOptions(["--format", "html"]).format, "html");
+  assert.equal(parseCliOptions(["--format", "text"]).format, "text");
+  assert.equal(parseCliOptions(["--format", "markdown"]).defaults.format, "markdown");
 });
 
 test("applyCliDefaultsToQuery only fills missing query filters", () => {
@@ -100,10 +123,35 @@ test("loadUserDefaults reads persistent defaults from the home directory", async
     `${JSON.stringify(
       {
         defaults: {
+          profile: "ci",
+          color: "auto",
           explain: "terse",
           excerpt: "highlighted",
           highlight: "tags",
           theme: "pill",
+        },
+        profiles: {
+          docs_bundle: {
+            format: "markdown",
+            color: "never",
+            excerpt: "highlighted",
+            highlight: "tags",
+            theme: "pill",
+          },
+        },
+        ask: {
+          profile: "html-report",
+          format: "markdown",
+          color: "never",
+          explain: "verbose",
+          excerpt: "raw",
+          highlight: "plain",
+          theme: "cyan",
+        },
+        index: {
+          defaults: {
+            format: "json",
+          },
         },
       },
       null,
@@ -113,6 +161,237 @@ test("loadUserDefaults reads persistent defaults from the home directory", async
   );
 
   assert.deepEqual(await loadUserDefaults(homeDir), {
+    profile: "ci",
+    extends: null,
+    format: null,
+    color: "auto",
+    explain: "terse",
+    excerpt: "highlighted",
+    highlight: "tags",
+    theme: "pill",
+    profiles: {
+      docs_bundle: {
+        profile: null,
+        extends: null,
+        format: "markdown",
+        color: "never",
+        explain: null,
+        excerpt: "highlighted",
+        highlight: "tags",
+        theme: "pill",
+      },
+    },
+    commands: {
+      ask: {
+        profile: "html-report",
+        extends: null,
+        format: "markdown",
+        color: "never",
+        explain: "verbose",
+        excerpt: "raw",
+        highlight: "plain",
+        theme: "cyan",
+      },
+      index: {
+        profile: null,
+        extends: null,
+        format: "json",
+        color: null,
+        explain: null,
+        excerpt: null,
+        highlight: null,
+        theme: null,
+      },
+    },
+  });
+});
+
+test("loadEnvDefaults reads shell-provided defaults", () => {
+  assert.deepEqual(
+    loadEnvDefaults({
+      GROUNDED_WORKSPACE_PROFILE: "terminal",
+      GROUNDED_WORKSPACE_FORMAT: "markdown",
+      GROUNDED_WORKSPACE_ASK_PROFILE: "markdown-doc",
+      GROUNDED_WORKSPACE_ASK_FORMAT: "html",
+      GROUNDED_WORKSPACE_INDEX_FORMAT: "json",
+      GROUNDED_WORKSPACE_COLOR: "auto",
+      GROUNDED_WORKSPACE_ASK_COLOR: "never",
+      GROUNDED_WORKSPACE_EXPLAIN: "verbose",
+      GROUNDED_WORKSPACE_ASK_EXPLAIN: "terse",
+      GROUNDED_WORKSPACE_EXCERPT: "highlighted",
+      GROUNDED_WORKSPACE_ASK_EXCERPT: "raw",
+      GROUNDED_WORKSPACE_HIGHLIGHT: "ansi",
+      GROUNDED_WORKSPACE_ASK_HIGHLIGHT: "tags",
+      GROUNDED_WORKSPACE_THEME: "Calm!",
+      GROUNDED_WORKSPACE_ASK_THEME: "pill",
+    }),
+    {
+      profile: "terminal",
+      extends: null,
+      format: "markdown",
+      color: "auto",
+      explain: "verbose",
+      excerpt: "highlighted",
+      highlight: "ansi",
+      theme: "calm",
+      commands: {
+        ask: {
+          profile: "markdown-doc",
+          extends: null,
+          format: "html",
+          color: "never",
+          explain: "terse",
+          excerpt: "raw",
+          highlight: "tags",
+          theme: "pill",
+        },
+        index: {
+          profile: null,
+          extends: null,
+          format: "json",
+          color: null,
+          explain: null,
+          excerpt: null,
+          highlight: null,
+          theme: null,
+        },
+      },
+      profiles: {},
+    },
+  );
+  assert.deepEqual(
+    loadEnvDefaults({
+      GROUNDED_WORKSPACE_FORMAT: "bad",
+      GROUNDED_WORKSPACE_EXPLAIN: "bad",
+      GROUNDED_WORKSPACE_EXCERPT: "nope",
+      GROUNDED_WORKSPACE_HIGHLIGHT: "wrong",
+      GROUNDED_WORKSPACE_THEME: "!!!",
+    }),
+    {
+      profile: null,
+      extends: null,
+      format: null,
+      color: null,
+      explain: null,
+      excerpt: null,
+      highlight: null,
+      theme: null,
+      commands: {
+        ask: {
+          profile: null,
+          extends: null,
+          format: null,
+          color: null,
+          explain: null,
+          excerpt: null,
+          highlight: null,
+          theme: null,
+        },
+        index: {
+          profile: null,
+          extends: null,
+          format: null,
+          color: null,
+          explain: null,
+          excerpt: null,
+          highlight: null,
+          theme: null,
+        },
+      },
+      profiles: {},
+    },
+  );
+});
+
+test("loadThemeConfig reads workspace-scoped profiles", async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "grounded-workspace-theme-"));
+  await fs.writeFile(
+    path.join(rootDir, ".grounded-workspace-theme.json"),
+    `${JSON.stringify(
+      {
+        profiles: {
+          repo_docs: {
+            format: "markdown",
+            color: "never",
+            excerpt: "highlighted",
+            highlight: "tags",
+            theme: "pill",
+          },
+        },
+        wrappers: {
+          pill: { before: "<span class=\"pill\">", after: "</span>" },
+        },
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+
+  const themeConfig = await loadThemeConfig(rootDir);
+  assert.deepEqual(themeConfig.profiles, {
+    repo_docs: {
+      profile: null,
+      extends: null,
+      format: "markdown",
+      color: "never",
+      explain: null,
+      excerpt: "highlighted",
+      highlight: "tags",
+      theme: "pill",
+    },
+  });
+});
+
+test("selectCommandDefaults lets per-command format override the global one", () => {
+  const defaults = {
+    profile: "terminal",
+    extends: null,
+    format: "markdown",
+    color: "auto",
+    explain: "terse",
+    excerpt: "highlighted",
+    highlight: "tags",
+    theme: "pill",
+    commands: {
+      ask: {
+        profile: "html-report",
+        extends: null,
+        format: "html",
+        color: "never",
+        explain: "verbose",
+        excerpt: "raw",
+        highlight: "plain",
+        theme: "cyan",
+      },
+      index: {
+        profile: null,
+        extends: null,
+        format: "json",
+        color: null,
+        explain: null,
+        excerpt: null,
+        highlight: null,
+        theme: null,
+      },
+    },
+  };
+
+  assert.deepEqual(selectCommandDefaults(defaults, "ask"), {
+    profile: "html-report",
+    extends: null,
+    format: "html",
+    color: "never",
+    explain: "verbose",
+    excerpt: "raw",
+    highlight: "plain",
+    theme: "cyan",
+  });
+  assert.deepEqual(selectCommandDefaults(defaults, "index"), {
+    profile: "terminal",
+    extends: null,
+    format: "json",
+    color: "auto",
     explain: "terse",
     excerpt: "highlighted",
     highlight: "tags",
@@ -120,34 +399,529 @@ test("loadUserDefaults reads persistent defaults from the home directory", async
   });
 });
 
-test("loadEnvDefaults reads shell-provided defaults", () => {
+test("applyProfileDefaults fills missing fields from built-in profiles", () => {
   assert.deepEqual(
-    loadEnvDefaults({
-      GROUNDED_WORKSPACE_EXPLAIN: "verbose",
-      GROUNDED_WORKSPACE_EXCERPT: "highlighted",
-      GROUNDED_WORKSPACE_HIGHLIGHT: "ansi",
-      GROUNDED_WORKSPACE_THEME: "Calm!",
+    applyProfileDefaults({
+      profile: "terminal",
+      format: null,
+      color: null,
+      explain: null,
+      excerpt: null,
+      highlight: null,
+      theme: null,
     }),
     {
-      explain: "verbose",
+      profile: "terminal",
+      extends: null,
+      format: "text",
+      color: "auto",
+      explain: null,
       excerpt: "highlighted",
       highlight: "ansi",
-      theme: "calm",
+      theme: "yellow",
     },
   );
   assert.deepEqual(
-    loadEnvDefaults({
-      GROUNDED_WORKSPACE_EXPLAIN: "bad",
-      GROUNDED_WORKSPACE_EXCERPT: "nope",
-      GROUNDED_WORKSPACE_HIGHLIGHT: "wrong",
-      GROUNDED_WORKSPACE_THEME: "!!!",
+    applyProfileDefaults({
+      profile: "html-report",
+      format: null,
+      color: null,
+      explain: "terse",
+      excerpt: null,
+      highlight: "plain",
+      theme: null,
     }),
     {
+      profile: "html-report",
+      extends: null,
+      format: "html",
+      color: "never",
+      explain: "terse",
+      excerpt: "highlighted",
+      highlight: "plain",
+      theme: null,
+    },
+  );
+  assert.deepEqual(
+    applyProfileDefaults(
+      {
+        profile: "docs_bundle",
+        format: null,
+        color: null,
+        explain: null,
+        excerpt: null,
+        highlight: null,
+        theme: null,
+      },
+      {
+        docs_bundle: {
+          profile: null,
+          extends: null,
+          format: "markdown",
+          color: "never",
+          explain: null,
+          excerpt: "highlighted",
+          highlight: "tags",
+          theme: "pill",
+        },
+      },
+    ),
+    {
+      profile: "docs_bundle",
+      extends: null,
+      format: "markdown",
+      color: "never",
+      explain: null,
+      excerpt: "highlighted",
+      highlight: "tags",
+      theme: "pill",
+    },
+  );
+});
+
+test("user profiles override workspace profiles with the same name", () => {
+  const workspaceProfiles = {
+    docs_bundle: {
+      profile: null,
+      extends: null,
+      format: "markdown",
+      color: "never",
+      explain: null,
+      excerpt: "highlighted",
+      highlight: "tags",
+      theme: "pill",
+    },
+  };
+  const userProfiles = {
+    docs_bundle: {
+      profile: null,
+      extends: null,
+      format: "html",
+      color: "never",
+      explain: null,
+      excerpt: "highlighted",
+      highlight: "tags",
+      theme: "pill",
+    },
+  };
+
+  assert.deepEqual(
+    applyProfileDefaults(
+      {
+        profile: "docs_bundle",
+        format: null,
+        color: null,
+        explain: null,
+        excerpt: null,
+        highlight: null,
+        theme: null,
+      },
+      { ...workspaceProfiles, ...userProfiles },
+    ),
+    {
+      profile: "docs_bundle",
+      extends: null,
+      format: "html",
+      color: "never",
+      explain: null,
+      excerpt: "highlighted",
+      highlight: "tags",
+      theme: "pill",
+    },
+  );
+});
+
+test("applyProfileDefaults resolves inherited custom profiles", () => {
+  assert.deepEqual(
+    applyProfileDefaults(
+      {
+        profile: "docs_report",
+        extends: null,
+        format: null,
+        color: null,
+        explain: null,
+        excerpt: null,
+        highlight: null,
+        theme: null,
+      },
+      {
+        docs_base: {
+          profile: null,
+          extends: null,
+          format: "markdown",
+          color: "never",
+          explain: null,
+          excerpt: "highlighted",
+          highlight: "tags",
+          theme: null,
+        },
+        docs_report: {
+          profile: null,
+          extends: "docs_base",
+          format: null,
+          color: null,
+          explain: "terse",
+          excerpt: null,
+          highlight: null,
+          theme: "pill",
+        },
+      },
+    ),
+    {
+      profile: "docs_report",
+      extends: null,
+      format: "markdown",
+      color: "never",
+      explain: "terse",
+      excerpt: "highlighted",
+      highlight: "tags",
+      theme: "pill",
+    },
+  );
+});
+
+test("applyProfileDefaults breaks profile cycles safely", () => {
+  assert.deepEqual(
+    applyProfileDefaults(
+      {
+        profile: "loop_a",
+        extends: null,
+        format: null,
+        color: null,
+        explain: null,
+        excerpt: null,
+        highlight: null,
+        theme: null,
+      },
+      {
+        loop_a: {
+          profile: null,
+          extends: "loop_b",
+          format: "markdown",
+          color: null,
+          explain: null,
+          excerpt: null,
+          highlight: null,
+          theme: null,
+        },
+        loop_b: {
+          profile: null,
+          extends: "loop_a",
+          format: null,
+          color: "never",
+          explain: null,
+          excerpt: null,
+          highlight: null,
+          theme: null,
+        },
+      },
+    ),
+    {
+      profile: "loop_a",
+      extends: null,
+      format: "markdown",
+      color: "never",
       explain: null,
       excerpt: null,
       highlight: null,
       theme: null,
     },
+  );
+});
+
+test("listProfiles reports merged profile sources and resolved defaults", () => {
+  assert.deepEqual(
+    listProfiles({
+      workspaceProfiles: {
+        repo_docs: {
+          profile: null,
+          extends: "markdown-doc",
+          format: null,
+          color: null,
+          explain: null,
+          excerpt: null,
+          highlight: null,
+          theme: "pill",
+        },
+        shared: {
+          profile: null,
+          extends: null,
+          format: "markdown",
+          color: "never",
+          explain: null,
+          excerpt: "highlighted",
+          highlight: "tags",
+          theme: null,
+        },
+      },
+      userProfiles: {
+        shared: {
+          profile: null,
+          extends: "ci",
+          format: null,
+          color: null,
+          explain: "verbose",
+          excerpt: null,
+          highlight: null,
+          theme: null,
+        },
+      },
+    }),
+    [
+      {
+        name: "ci",
+        source: "built-in",
+        extends: null,
+        resolved: {
+          profile: null,
+          extends: null,
+          format: "text",
+          color: "never",
+          explain: null,
+          excerpt: "highlighted",
+          highlight: "plain",
+          theme: null,
+        },
+      },
+      {
+        name: "html-report",
+        source: "built-in",
+        extends: null,
+        resolved: {
+          profile: null,
+          extends: null,
+          format: "html",
+          color: "never",
+          explain: null,
+          excerpt: "highlighted",
+          highlight: "tags",
+          theme: null,
+        },
+      },
+      {
+        name: "markdown-doc",
+        source: "built-in",
+        extends: null,
+        resolved: {
+          profile: null,
+          extends: null,
+          format: "markdown",
+          color: "never",
+          explain: null,
+          excerpt: "highlighted",
+          highlight: "tags",
+          theme: null,
+        },
+      },
+      {
+        name: "repo_docs",
+        source: "workspace",
+        extends: "markdown-doc",
+        resolved: {
+          profile: null,
+          extends: "markdown-doc",
+          format: "markdown",
+          color: "never",
+          explain: null,
+          excerpt: "highlighted",
+          highlight: "tags",
+          theme: "pill",
+        },
+      },
+      {
+        name: "shared",
+        source: "user",
+        extends: "ci",
+        resolved: {
+          profile: null,
+          extends: "ci",
+          format: "text",
+          color: "never",
+          explain: "verbose",
+          excerpt: "highlighted",
+          highlight: "plain",
+          theme: null,
+        },
+      },
+      {
+        name: "terminal",
+        source: "built-in",
+        extends: null,
+        resolved: {
+          profile: null,
+          extends: null,
+          format: "text",
+          color: "auto",
+          explain: null,
+          excerpt: "highlighted",
+          highlight: "ansi",
+          theme: "yellow",
+        },
+      },
+    ],
+  );
+});
+
+test("resolveColorMode applies cli, env, and user defaults", () => {
+  assert.equal(
+    resolveColorMode({
+      cliDefaults: { color: "always" },
+      envDefaults: { color: "never" },
+      userDefaults: { color: "auto" },
+      fallback: "auto",
+    }),
+    "always",
+  );
+  assert.equal(
+    resolveColorMode({
+      cliDefaults: { color: null },
+      envDefaults: { color: "never" },
+      userDefaults: { color: "auto" },
+      fallback: "auto",
+    }),
+    "never",
+  );
+});
+
+test("ask command defaults compose as query over cli over env over user", () => {
+  const userDefaults = selectCommandDefaults(
+    {
+      format: "markdown",
+      color: "auto",
+      explain: "verbose",
+      excerpt: "highlighted",
+      highlight: "plain",
+      theme: "green",
+      commands: {
+        ask: {
+          format: "html",
+          color: "never",
+          explain: "terse",
+          excerpt: "raw",
+          highlight: "tags",
+          theme: "cyan",
+        },
+      },
+    },
+    "ask",
+  );
+  const envDefaults = selectCommandDefaults(
+    {
+      format: "json",
+      color: "auto",
+      explain: "verbose",
+      excerpt: "highlighted",
+      highlight: "ansi",
+      theme: "magenta",
+      commands: {
+        ask: {
+          format: "markdown",
+          color: "always",
+          explain: "verbose",
+          excerpt: "highlighted",
+          highlight: "brackets",
+          theme: "pill",
+        },
+      },
+    },
+    "ask",
+  );
+  const cliDefaults = {
+    format: "text",
+    color: null,
+    explain: "terse",
+    excerpt: "raw",
+    highlight: "plain",
+    theme: "yellow",
+  };
+
+  assert.equal(
+    resolveOutputFormat({
+      cliFormat: cliDefaults.format,
+      cliDefaults,
+      envDefaults,
+      userDefaults,
+      fallback: "text",
+      command: "ask",
+    }),
+    "text",
+  );
+  assert.equal(
+    resolveColorMode({
+      cliDefaults,
+      envDefaults,
+      userDefaults,
+      fallback: "auto",
+    }),
+    "always",
+  );
+  assert.equal(
+    applyCliDefaultsToQuery(
+      applyCliDefaultsToQuery(
+        applyCliDefaultsToQuery("saved index explain:verbose", userDefaults),
+        envDefaults,
+      ),
+      cliDefaults,
+    ),
+    "saved index explain:verbose excerpt:raw highlight:tags theme:cyan",
+  );
+});
+
+test("resolveOutputFormat applies cli, env, and user defaults with index safety", () => {
+  assert.equal(
+    resolveOutputFormat({
+      cliFormat: "html",
+      cliDefaults: { format: "markdown" },
+      envDefaults: { format: "json" },
+      userDefaults: { format: "text" },
+      fallback: "text",
+      command: "ask",
+    }),
+    "html",
+  );
+  assert.equal(
+    resolveOutputFormat({
+      cliFormat: null,
+      cliDefaults: { format: null },
+      envDefaults: { format: "markdown" },
+      userDefaults: { format: "json" },
+      fallback: "text",
+      command: "ask",
+    }),
+    "markdown",
+  );
+  assert.equal(
+    resolveOutputFormat({
+      cliFormat: null,
+      cliDefaults: { format: null },
+      envDefaults: { format: null },
+      userDefaults: { format: "html" },
+      fallback: "text",
+      command: "ask",
+    }),
+    "html",
+  );
+  assert.equal(
+    resolveOutputFormat({
+      cliFormat: "html",
+      cliDefaults: { format: "markdown" },
+      envDefaults: { format: "json" },
+      userDefaults: { format: "text" },
+      fallback: "text",
+      command: "index",
+    }),
+    "text",
+  );
+  assert.equal(
+    resolveOutputFormat({
+      cliFormat: null,
+      cliDefaults: { format: null },
+      envDefaults: { format: "json" },
+      userDefaults: { format: "markdown" },
+      fallback: "text",
+      command: "index",
+    }),
+    "json",
   );
 });
 
@@ -157,6 +931,8 @@ test("default precedence keeps query strongest, then cli, env, user, output, and
     themes: {},
     wrappers: {
       pill: { before: "<mark>", after: "</mark>" },
+      mdpill: { before: "**", after: "**" },
+      htmlpill: { before: "<span>", after: "</span>" },
     },
     defaults: {
       jsonTheme: "pill",
@@ -181,8 +957,8 @@ test("default precedence keeps query strongest, then cli, env, user, output, and
     highlight: "tags",
     theme: "cyan",
   });
-  const outputQuery = applyOutputDefaultsToQuery(cliQuery, { json: true });
-  const configuredThemeQuery = applyConfiguredThemeDefaults(outputQuery, { json: true }, themeConfig);
+  const outputQuery = applyOutputDefaultsToQuery(cliQuery, { outputFormat: "json" });
+  const configuredThemeQuery = applyConfiguredThemeDefaults(outputQuery, { outputFormat: "json" }, themeConfig);
   const effectiveQuery = resolveThemeAliasesInQuery(configuredThemeQuery, themeConfig);
 
   assert.equal(effectiveQuery, "saved index explain:verbose excerpt:highlighted highlight:plain theme:pill");
@@ -191,8 +967,8 @@ test("default precedence keeps query strongest, then cli, env, user, output, and
       applyConfiguredThemeDefaults(
         applyOutputDefaultsToQuery(
           applyCliDefaultsToQuery(
-            applyCliDefaultsToQuery(
-              applyCliDefaultsToQuery("saved index explain:terse highlight:brackets", {
+          applyCliDefaultsToQuery(
+            applyCliDefaultsToQuery("saved index explain:terse highlight:brackets", {
                 explain: "verbose",
                 excerpt: "highlighted",
                 highlight: null,
@@ -212,9 +988,9 @@ test("default precedence keeps query strongest, then cli, env, user, output, and
               theme: "cyan",
             },
           ),
-          { json: true },
+          { outputFormat: "json" },
         ),
-        { json: true },
+        { outputFormat: "json" },
         themeConfig,
       ),
       themeConfig,
@@ -225,61 +1001,87 @@ test("default precedence keeps query strongest, then cli, env, user, output, and
 
 test("applyOutputDefaultsToQuery adds output-specific highlight defaults", () => {
   assert.equal(
-    applyOutputDefaultsToQuery("saved index excerpt:highlighted", { json: false, isTTY: true, noColor: false, term: "xterm-256color" }),
+    applyOutputDefaultsToQuery("saved index excerpt:highlighted", { outputFormat: "text", colorMode: "auto", isTTY: true, term: "xterm-256color" }),
     "saved index excerpt:highlighted highlight:ansi",
   );
   assert.equal(
-    applyOutputDefaultsToQuery("saved index excerpt:highlighted", { json: true }),
+    applyOutputDefaultsToQuery("saved index excerpt:highlighted", { outputFormat: "json", colorMode: "auto" }),
     "saved index excerpt:highlighted highlight:tags",
   );
   assert.equal(
-    applyOutputDefaultsToQuery("saved index excerpt:highlighted", { json: false, isTTY: false, noColor: false, term: "xterm-256color" }),
+    applyOutputDefaultsToQuery("saved index excerpt:highlighted", { outputFormat: "markdown", colorMode: "auto" }),
+    "saved index excerpt:highlighted highlight:tags",
+  );
+  assert.equal(
+    applyOutputDefaultsToQuery("saved index excerpt:highlighted", { outputFormat: "html", colorMode: "auto" }),
+    "saved index excerpt:highlighted highlight:tags",
+  );
+  assert.equal(
+    applyOutputDefaultsToQuery("saved index excerpt:highlighted", { outputFormat: "text", colorMode: "auto", isTTY: false, term: "xterm-256color" }),
     "saved index excerpt:highlighted highlight:plain",
   );
   assert.equal(
-    applyOutputDefaultsToQuery("saved index excerpt:highlighted", { json: false, isTTY: true, noColor: true, term: "xterm-256color" }),
+    applyOutputDefaultsToQuery("saved index excerpt:highlighted", { outputFormat: "text", colorMode: "never", isTTY: true, term: "xterm-256color" }),
     "saved index excerpt:highlighted highlight:plain",
   );
   assert.equal(
-    applyOutputDefaultsToQuery("saved index excerpt:highlighted highlight:brackets", { json: true }),
+    applyOutputDefaultsToQuery("saved index excerpt:highlighted highlight:brackets", { outputFormat: "json", colorMode: "auto" }),
     "saved index excerpt:highlighted highlight:brackets",
   );
   assert.equal(
-    applyOutputDefaultsToQuery("saved index excerpt:highlighted highlight:ansi", { json: true }),
+    applyOutputDefaultsToQuery("saved index excerpt:highlighted highlight:ansi", { outputFormat: "html", colorMode: "always" }),
     "saved index excerpt:highlighted highlight:tags",
   );
   assert.equal(
-    applyOutputDefaultsToQuery("saved index excerpt:highlighted highlight:ansi", { json: false, isTTY: false, noColor: false, term: "xterm-256color" }),
+    applyOutputDefaultsToQuery("saved index excerpt:highlighted highlight:ansi", { outputFormat: "text", colorMode: "always", isTTY: false, term: "xterm-256color" }),
+    "saved index excerpt:highlighted highlight:ansi",
+  );
+  assert.equal(
+    applyOutputDefaultsToQuery("saved index excerpt:highlighted highlight:ansi", { outputFormat: "text", colorMode: "never", isTTY: true, term: "xterm-256color" }),
     "saved index excerpt:highlighted highlight:plain",
   );
-  assert.equal(applyOutputDefaultsToQuery("saved index", { json: false }), "saved index");
+  assert.equal(applyOutputDefaultsToQuery("saved index", { outputFormat: "text", colorMode: "auto" }), "saved index");
 });
 
 test("applyConfiguredThemeDefaults injects output and highlight defaults when theme is absent", () => {
   const themeConfig = {
     themes: { ocean: "\u001b[38;5;45m" },
-    wrappers: { pill: { before: "<span class=\"pill\">", after: "</span>" } },
+    wrappers: {
+      pill: { before: "<span class=\"pill\">", after: "</span>" },
+      mdpill: { before: "**", after: "**" },
+      htmlpill: { before: "<mark>", after: "</mark>" },
+    },
     defaults: {
       jsonTheme: "pill",
+      markdownTheme: "mdpill",
+      htmlTheme: "htmlpill",
       plainTheme: "pill",
       ansiTheme: "ocean",
     },
   };
 
   assert.equal(
-    applyConfiguredThemeDefaults("saved index excerpt:highlighted highlight:tags", { json: true }, themeConfig),
+    applyConfiguredThemeDefaults("saved index excerpt:highlighted highlight:tags", { outputFormat: "json" }, themeConfig),
     "saved index excerpt:highlighted highlight:tags theme:pill",
   );
   assert.equal(
-    applyConfiguredThemeDefaults("saved index excerpt:highlighted highlight:plain", { json: false }, themeConfig),
+    applyConfiguredThemeDefaults("saved index excerpt:highlighted highlight:tags", { outputFormat: "markdown" }, themeConfig),
+    "saved index excerpt:highlighted highlight:tags theme:mdpill",
+  );
+  assert.equal(
+    applyConfiguredThemeDefaults("saved index excerpt:highlighted highlight:tags", { outputFormat: "html" }, themeConfig),
+    "saved index excerpt:highlighted highlight:tags theme:htmlpill",
+  );
+  assert.equal(
+    applyConfiguredThemeDefaults("saved index excerpt:highlighted highlight:plain", { outputFormat: "text" }, themeConfig),
     "saved index excerpt:highlighted highlight:plain theme:pill",
   );
   assert.equal(
-    applyConfiguredThemeDefaults("saved index excerpt:highlighted highlight:ansi", { json: false }, themeConfig),
+    applyConfiguredThemeDefaults("saved index excerpt:highlighted highlight:ansi", { outputFormat: "text" }, themeConfig),
     "saved index excerpt:highlighted highlight:ansi theme:ocean",
   );
   assert.equal(
-    applyConfiguredThemeDefaults("saved index excerpt:highlighted highlight:tags theme:custom", { json: true }, themeConfig),
+    applyConfiguredThemeDefaults("saved index excerpt:highlighted highlight:tags theme:custom", { outputFormat: "json" }, themeConfig),
     "saved index excerpt:highlighted highlight:tags theme:custom",
   );
 });
@@ -300,6 +1102,8 @@ test("resolveThemeAliasesInQuery maps aliases and falls back cleanly", async () 
         },
         defaults: {
           jsonTheme: "pill",
+          markdownTheme: "pill",
+          htmlTheme: "pill",
           ansiTheme: "ocean",
         },
       },
@@ -344,8 +1148,80 @@ test("resolveThemeAliasesInQuery maps aliases and falls back cleanly", async () 
   });
   assert.deepEqual(themeConfig.defaults, {
     jsonTheme: "pill",
+    markdownTheme: "pill",
+    htmlTheme: "pill",
     ansiTheme: "ocean",
   });
+});
+
+test("formatAskOutput renders markdown and html responses", () => {
+  const payload = {
+    source: "index",
+    indexPath: "/tmp/.grounded-workspace-index.json",
+    answer: "Grounded answer.",
+    matches: [
+      {
+        path: "README.md",
+        chunk: { startLine: 3, endLine: 5 },
+        score: 12.5,
+        excerpt: "<mark>grounded</mark> evidence",
+        why: {
+          tokenScore: 4,
+          pathScore: 0,
+          coverageScore: 3,
+          phraseScore: 2,
+          densityScore: 1.5,
+          retrievalBias: 2,
+          matchedTerms: ["grounded"],
+          phraseHits: ["grounded answer"],
+          pathHits: ["readme"],
+        },
+      },
+    ],
+  };
+
+  const markdown = formatAskOutput(payload, "markdown");
+  assert.match(markdown, /# grounded-workspace answer/);
+  assert.match(markdown, /## Evidence/);
+  assert.match(markdown, /<mark>grounded<\/mark> evidence/);
+
+  const html = formatAskOutput(payload, "html");
+  assert.match(html, /<!doctype html>/i);
+  assert.match(html, /<h2>Evidence<\/h2>/);
+  assert.match(html, /<mark>grounded<\/mark> evidence/);
+});
+
+test("formatProfilesOutput renders text, markdown, and html responses", () => {
+  const payload = {
+    root: "/tmp/workspace",
+    profiles: [
+      {
+        name: "docs_bundle",
+        source: "user",
+        extends: "docs_base",
+        resolved: {
+          format: "markdown",
+          color: "never",
+          explain: "terse",
+          excerpt: "highlighted",
+          highlight: "tags",
+          theme: "pill",
+        },
+      },
+    ],
+  };
+
+  const text = formatProfilesOutput(payload, "text");
+  assert.match(text, /Available profiles for \/tmp\/workspace/);
+  assert.match(text, /docs_bundle \[user\] extends docs_base/);
+
+  const markdown = formatProfilesOutput(payload, "markdown");
+  assert.match(markdown, /# grounded-workspace profiles/);
+  assert.match(markdown, /Source: user extends `docs_base`/);
+
+  const html = formatProfilesOutput(payload, "html");
+  assert.match(html, /<!doctype html>/i);
+  assert.match(html, /Source: user extends <code>docs_base<\/code>/);
 });
 
 test("rankDocuments prioritizes content and path hits", () => {
