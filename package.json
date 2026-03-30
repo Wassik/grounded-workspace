@@ -1,0 +1,15 @@
+{
+  "name": "grounded-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local-first CLI for indexing a workspace and answering grounded questions from file content.",
+  "bin": {
+    "grounded-workspace": "./src/cli.js"
+  },
+  "scripts": {
+    "ask": "node ./src/cli.js ask",
+    "index": "node ./src/cli.js index",
+    "test": "node --test"
+  }
+}
