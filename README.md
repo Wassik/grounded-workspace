@@ -16,6 +16,8 @@ This is the smallest useful core of an AI workspace assistant:
 ```bash
 npm test
 node ./src/cli.js index .
+node ./src/cli.js refresh . --incremental
+node ./src/cli.js refresh . --watch --json
 node ./src/cli.js ask . "how does indexing work"
 node ./src/cli.js ask . "ext:md path:src indexing"
 node ./src/cli.js ask . "path:src limit:2 saved index"
@@ -31,18 +33,31 @@ node ./src/cli.js ask . "saved index" --profile docs_bundle
 node ./src/cli.js profiles .
 node ./src/cli.js profiles . --format markdown
 node ./src/cli.js profiles . --json
+node ./src/cli.js profiles . --ask-format json --ask-excerpt highlighted --ask-highlight ansi
 node ./src/cli.js ask . "saved index excerpt:highlighted" --format markdown
 node ./src/cli.js ask . "saved index excerpt:highlighted" --format html
 node ./src/cli.js ask . "saved index" --excerpt highlighted --highlight tags --theme pill --explain terse --json
 node ./src/cli.js ask . "saved index" --json
+node ./src/cli.js investigate . "how do profile defaults work"
+node ./src/cli.js investigate . "where is theme alias resolution implemented" --refresh-if-stale
+node ./src/cli.js investigate . "how do profile defaults work" --output-file ./report.md
+node ./src/cli.js investigate . "how do profile defaults work" --output-file ./report.md --json
 ```
 
 `index` writes `.grounded-workspace-index.json` into the target directory. It stores chunked file sections with line ranges. `ask` reuses that file when present and falls back to a live scan when it is missing.
+`refresh` can rebuild that saved index incrementally, and `refresh --watch --json` emits one compact JSON object per refresh event.
+`investigate` runs a small grounded retrieval workflow and returns a summary, key files, evidence, and gaps.
 
 `ask` now prints a short grounded answer first, followed by the supporting chunk matches.
+`investigate --json --output-file ./report.md` writes JSON to `./report.json` so the file extension matches the content.
+`investigate --live` cannot be combined with `--refresh-index` or `--refresh-if-stale`.
 
 Add `--json` to `index` or `ask` for machine-readable output.
 Use `profiles` to inspect built-in, workspace, and user-defined render profiles after inheritance is resolved.
+It also shows the currently active resolved defaults for `ask` and `index` after user and environment defaults are layered.
+It now also shows the effective `ask` defaults by output format after output-aware rewrites, such as ANSI highlights downgrading to tag wrappers in JSON.
+You can preview hypothetical command-line overrides with flags like `--ask-format`, `--ask-highlight`, `--ask-theme`, or `--index-format`.
+Each reported field now includes a source label such as `cli`, `env`, `user`, `env+profile`, `cli+output`, or `workspace-output`.
 `ask` also accepts `--profile`, `--format`, `--color`, `--explain`, `--excerpt`, `--highlight`, and `--theme` as command-level defaults.
 Persistent user-level defaults can be defined in `~/.grounded-workspace.json`.
 Shell-level defaults can be defined with `GROUNDED_WORKSPACE_PROFILE`, `GROUNDED_WORKSPACE_ASK_PROFILE`, `GROUNDED_WORKSPACE_FORMAT`, `GROUNDED_WORKSPACE_ASK_FORMAT`, `GROUNDED_WORKSPACE_INDEX_FORMAT`, `GROUNDED_WORKSPACE_COLOR`, `GROUNDED_WORKSPACE_ASK_COLOR`, `GROUNDED_WORKSPACE_EXPLAIN`, `GROUNDED_WORKSPACE_ASK_EXPLAIN`, `GROUNDED_WORKSPACE_EXCERPT`, `GROUNDED_WORKSPACE_ASK_EXCERPT`, `GROUNDED_WORKSPACE_HIGHLIGHT`, `GROUNDED_WORKSPACE_ASK_HIGHLIGHT`, `GROUNDED_WORKSPACE_THEME`, and `GROUNDED_WORKSPACE_ASK_THEME`.
@@ -61,6 +76,8 @@ The `profiles` command lists every available profile with:
 - its source: `built-in`, `workspace`, or `user`
 - its `extends` parent when present
 - its resolved output defaults after inheritance
+- the active resolved defaults for `ask` and `index`
+- the effective `ask` defaults for `text`, `json`, `markdown`, and `html`
 
 Custom profiles can be defined in `~/.grounded-workspace.json` and used anywhere `--profile` or `profile` defaults are accepted.
 Workspace-scoped profiles can be defined in `.grounded-workspace-theme.json` and are available to anyone using that repo.

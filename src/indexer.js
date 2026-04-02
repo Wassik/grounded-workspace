@@ -44,19 +44,65 @@ const TEXT_EXTENSIONS = new Set([
 
 export async function scanWorkspace(rootDir) {
   const ignoreRules = await loadIgnoreRules(rootDir);
-  const files = [];
-  await walk(rootDir, rootDir, files, ignoreRules);
-  return files;
+  const files = await collectWorkspaceFiles(rootDir, ignoreRules);
+  return files.flatMap((file) => chunkDocument(file.path, file.content));
 }
 
-export async function buildIndex(rootDir) {
-  const documents = await scanWorkspace(rootDir);
+export async function buildIndex(rootDir, options = {}) {
+  const incremental = options.incremental === true;
+  const ignoreRules = await loadIgnoreRules(rootDir);
+  const files = await collectWorkspaceFiles(rootDir, ignoreRules);
+  const fileRecords = files.map((file) => ({
+    path: file.path,
+    mtimeMs: file.mtimeMs,
+  }));
+  let documents;
+  let reusedFiles = 0;
+  let changedFiles = files.length;
+  let deletedFiles = 0;
+
+  if (incremental) {
+    const existingIndex = await loadIncrementalBaseIndex(rootDir);
+    if (existingIndex?.files) {
+      const existingFileMap = new Map(existingIndex.files.map((file) => [file.path, file]));
+      const existingDocumentsByPath = groupDocumentsByPath(hydrateDocuments(existingIndex.documents ?? []));
+      const currentPaths = new Set(files.map((file) => file.path));
+      documents = [];
+      changedFiles = 0;
+
+      for (const file of files) {
+        const existingFile = existingFileMap.get(file.path);
+        if (existingFile && existingFile.mtimeMs === file.mtimeMs && existingDocumentsByPath.has(file.path)) {
+          documents.push(...existingDocumentsByPath.get(file.path));
+          reusedFiles += 1;
+          continue;
+        }
+
+        documents.push(...chunkDocument(file.path, file.content));
+        changedFiles += 1;
+      }
+
+      deletedFiles = existingIndex.files.filter((file) => !currentPaths.has(file.path)).length;
+    } else {
+      documents = files.flatMap((file) => chunkDocument(file.path, file.content));
+    }
+  } else {
+    documents = files.flatMap((file) => chunkDocument(file.path, file.content));
+  }
+
   return {
-    version: 2,
+    version: 3,
     root: rootDir,
     generatedAt: new Date().toISOString(),
     filesIndexed: countUniqueFiles(documents),
     chunksIndexed: documents.length,
+    files: fileRecords,
+    incremental: {
+      enabled: incremental,
+      reusedFiles,
+      changedFiles,
+      deletedFiles,
+    },
     documents: documents.map(serializeDocument),
   };
 }
@@ -78,17 +124,153 @@ export async function loadDocuments(rootDir) {
     const index = await loadIndex(rootDir);
     return {
       source: "index",
+      sourceReason: "loaded saved index",
       indexPath: getIndexPath(rootDir),
+      generatedAt: index.generatedAt ?? null,
+      files: index.files ?? null,
       documents: hydrateDocuments(index.documents),
     };
-  } catch {
+  } catch (error) {
+    const sourceReason =
+      error?.code === "ENOENT"
+        ? "saved index missing"
+        : error instanceof SyntaxError
+          ? "saved index invalid JSON"
+          : "saved index unreadable";
     const documents = await scanWorkspace(rootDir);
     return {
       source: "scan",
+      sourceReason,
       indexPath: getIndexPath(rootDir),
+      generatedAt: null,
       documents,
     };
   }
+}
+
+export async function getIndexFreshness(rootDir, generatedAt = null) {
+  let indexedFiles = null;
+
+  if (generatedAt && typeof generatedAt === "object") {
+    indexedFiles = Array.isArray(generatedAt.files) ? generatedAt.files : null;
+    generatedAt = generatedAt.generatedAt ?? null;
+  }
+
+  if (Array.isArray(indexedFiles) && indexedFiles.length > 0) {
+    return getIndexedFilesFreshness(rootDir, indexedFiles);
+  }
+
+  const indexGeneratedAt = generatedAt ? Date.parse(generatedAt) : Number.NaN;
+  if (!Number.isFinite(indexGeneratedAt)) {
+    return {
+      status: "unknown",
+      reason: "index timestamp unavailable",
+      latestFilePath: null,
+      latestFileMtime: null,
+    };
+  }
+
+  const ignoreRules = await loadIgnoreRules(rootDir);
+  const latestFile = await findLatestIndexedFile(rootDir, rootDir, ignoreRules);
+
+  if (!latestFile) {
+    return {
+      status: "fresh",
+      reason: "no newer indexed files found",
+      latestFilePath: null,
+      latestFileMtime: null,
+    };
+  }
+
+  if (latestFile.mtimeMs > indexGeneratedAt) {
+    return {
+      status: "stale",
+      reason: `${latestFile.path} changed after the saved index was generated`,
+      latestFilePath: latestFile.path,
+      latestFileMtime: new Date(latestFile.mtimeMs).toISOString(),
+    };
+  }
+
+  return {
+    status: "fresh",
+    reason: "saved index is newer than indexed files",
+    latestFilePath: latestFile.path,
+    latestFileMtime: new Date(latestFile.mtimeMs).toISOString(),
+  };
+}
+
+async function getIndexedFilesFreshness(rootDir, indexedFiles) {
+  const ignoreRules = await loadIgnoreRules(rootDir);
+  const currentFiles = await collectWorkspaceFiles(rootDir, ignoreRules);
+  const currentFileMap = new Map(currentFiles.map((file) => [file.path, file]));
+  const indexedFileMap = new Map(indexedFiles.map((file) => [file.path, file]));
+  const changedFiles = [];
+  const deletedFiles = [];
+  const newFiles = [];
+  let latestChanged = null;
+
+  for (const indexedFile of indexedFiles) {
+    const currentFile = currentFileMap.get(indexedFile.path);
+    if (!currentFile) {
+      deletedFiles.push(indexedFile.path);
+      continue;
+    }
+
+    if (currentFile.mtimeMs !== indexedFile.mtimeMs) {
+      changedFiles.push(indexedFile.path);
+      if (!latestChanged || currentFile.mtimeMs > latestChanged.mtimeMs) {
+        latestChanged = {
+          path: currentFile.path,
+          mtimeMs: currentFile.mtimeMs,
+        };
+      }
+    }
+  }
+
+  for (const currentFile of currentFiles) {
+    if (!indexedFileMap.has(currentFile.path)) {
+      newFiles.push(currentFile.path);
+      if (!latestChanged || currentFile.mtimeMs > latestChanged.mtimeMs) {
+        latestChanged = {
+          path: currentFile.path,
+          mtimeMs: currentFile.mtimeMs,
+        };
+      }
+    }
+  }
+
+  if (changedFiles.length === 0 && deletedFiles.length === 0 && newFiles.length === 0) {
+    return {
+      status: "fresh",
+      reason: "saved index matches current indexed files",
+      latestFilePath: currentFiles[0]?.path ?? null,
+      latestFileMtime: currentFiles[0] ? new Date(currentFiles[0].mtimeMs).toISOString() : null,
+      changedFiles: 0,
+      deletedFiles: 0,
+      newFiles: 0,
+    };
+  }
+
+  const reasonParts = [];
+  if (changedFiles.length > 0) {
+    reasonParts.push(`${changedFiles.length} changed`);
+  }
+  if (deletedFiles.length > 0) {
+    reasonParts.push(`${deletedFiles.length} deleted`);
+  }
+  if (newFiles.length > 0) {
+    reasonParts.push(`${newFiles.length} new`);
+  }
+
+  return {
+    status: "stale",
+    reason: `saved index differs from current files (${reasonParts.join(", ")})`,
+    latestFilePath: latestChanged?.path ?? null,
+    latestFileMtime: latestChanged ? new Date(latestChanged.mtimeMs).toISOString() : null,
+    changedFiles: changedFiles.length,
+    deletedFiles: deletedFiles.length,
+    newFiles: newFiles.length,
+  };
 }
 
 export function getIndexPath(rootDir) {
@@ -124,6 +306,103 @@ async function walk(rootDir, currentDir, files, ignoreRules) {
 
     files.push(...chunkDocument(relativePath, content));
   }
+}
+
+async function collectWorkspaceFiles(rootDir, ignoreRules) {
+  const files = [];
+  await walkFiles(rootDir, rootDir, files, ignoreRules);
+  return files;
+}
+
+async function walkFiles(rootDir, currentDir, files, ignoreRules) {
+  const entries = await fs.readdir(currentDir, { withFileTypes: true });
+
+  for (const entry of entries) {
+    const absolutePath = path.join(currentDir, entry.name);
+    const relativePath = path.relative(rootDir, absolutePath);
+
+    if (entry.isDirectory()) {
+      if (!shouldIgnorePath(relativePath, entry.name, true, ignoreRules)) {
+        await walkFiles(rootDir, absolutePath, files, ignoreRules);
+      }
+      continue;
+    }
+
+    if (!entry.isFile()) {
+      continue;
+    }
+
+    if (!shouldIndexFile(relativePath, entry.name, ignoreRules)) {
+      continue;
+    }
+
+    const content = await readTextFile(absolutePath);
+    if (!content) {
+      continue;
+    }
+
+    try {
+      const stat = await fs.stat(absolutePath);
+      files.push({
+        path: relativePath.split(path.sep).join("/"),
+        absolutePath,
+        mtimeMs: stat.mtimeMs,
+        content,
+      });
+    } catch {
+      continue;
+    }
+  }
+}
+
+async function loadIncrementalBaseIndex(rootDir) {
+  try {
+    const index = await loadIndex(rootDir);
+    if (!Array.isArray(index.files)) {
+      return null;
+    }
+    return index;
+  } catch {
+    return null;
+  }
+}
+
+async function findLatestIndexedFile(rootDir, currentDir, ignoreRules, latest = null) {
+  const entries = await fs.readdir(currentDir, { withFileTypes: true });
+
+  for (const entry of entries) {
+    const absolutePath = path.join(currentDir, entry.name);
+    const relativePath = path.relative(rootDir, absolutePath);
+
+    if (entry.isDirectory()) {
+      if (!shouldIgnorePath(relativePath, entry.name, true, ignoreRules)) {
+        latest = await findLatestIndexedFile(rootDir, absolutePath, ignoreRules, latest);
+      }
+      continue;
+    }
+
+    if (!entry.isFile()) {
+      continue;
+    }
+
+    if (!shouldIndexFile(relativePath, entry.name, ignoreRules)) {
+      continue;
+    }
+
+    try {
+      const stat = await fs.stat(absolutePath);
+      if (!latest || stat.mtimeMs > latest.mtimeMs) {
+        latest = {
+          path: relativePath.split(path.sep).join("/"),
+          mtimeMs: stat.mtimeMs,
+        };
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return latest;
 }
 
 function shouldIndexFile(relativePath, fileName, ignoreRules) {
@@ -973,6 +1252,18 @@ function hydrateDocuments(documents) {
   }));
 }
 
+function groupDocumentsByPath(documents) {
+  const grouped = new Map();
+
+  for (const document of documents) {
+    const existing = grouped.get(document.path) ?? [];
+    existing.push(document);
+    grouped.set(document.path, existing);
+  }
+
+  return grouped;
+}
+
 function chunkDocument(filePath, content) {
   const lines = content.split("\n");
   if (lines.length <= CHUNK_SIZE_LINES) {
@@ -986,14 +1277,22 @@ function chunkDocument(filePath, content) {
     ];
   }
 
+  const splitPoints = findChunkSplitPoints(lines);
   const documents = [];
   const step = CHUNK_SIZE_LINES - CHUNK_OVERLAP_LINES;
 
   for (let start = 0; start < lines.length; start += step) {
-    const end = Math.min(lines.length, start + CHUNK_SIZE_LINES);
+    let end = Math.min(lines.length, start + CHUNK_SIZE_LINES);
+    const forcedEnd = splitPoints.find((lineNumber) => lineNumber > start + 1 && lineNumber < end);
+    if (forcedEnd) {
+      end = forcedEnd - 1;
+    }
     const chunkContent = lines.slice(start, end).join("\n").trim();
 
     if (!chunkContent) {
+      if (forcedEnd) {
+        start = forcedEnd - step - 1;
+      }
       continue;
     }
 
@@ -1004,12 +1303,42 @@ function chunkDocument(filePath, content) {
       tokens: tokenize(`${filePath}\n${chunkContent}`),
     });
 
+    if (forcedEnd) {
+      start = forcedEnd - step - 1;
+    }
+
     if (end === lines.length) {
       break;
     }
   }
 
   return documents;
+}
+
+function findChunkSplitPoints(lines) {
+  const splitPoints = [];
+  let optionRunLength = 0;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const trimmed = line.trim();
+    const isOptionLine = /^\s{0,2}--[a-z0-9-]+/.test(line);
+
+    if (/^(Usage:|Notes:)$/i.test(trimmed)) {
+      splitPoints.push(index + 1);
+    }
+
+    if (isOptionLine) {
+      optionRunLength += 1;
+    } else {
+      if (optionRunLength >= 3) {
+        splitPoints.push(index + 1);
+      }
+      optionRunLength = 0;
+    }
+  }
+
+  return [...new Set(splitPoints)].sort((left, right) => left - right);
 }
 
 function countUniqueFiles(documents) {
