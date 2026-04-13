@@ -18,6 +18,7 @@ import {
   tokenize,
 } from "../src/indexer.js";
 import {
+  main,
   applyCliDefaultsToQuery,
   applyConfiguredThemeDefaults,
   applyProfileDefaults,
@@ -52,6 +53,47 @@ import {
 } from "../src/cli.js";
 
 const execFile = promisify(execFileCallback);
+
+async function invokeCli(args, { cwd = process.cwd() } = {}) {
+  const originalArgv = process.argv;
+  const originalCwd = process.cwd();
+  const originalStdoutWrite = process.stdout.write;
+  const originalStderrWrite = process.stderr.write;
+  let stdout = "";
+  let stderr = "";
+
+  process.argv = [process.execPath, path.join(cwd, "src/cli.js"), ...args];
+  process.stdout.write = ((chunk, encoding, callback) => {
+    stdout += typeof chunk === "string" ? chunk : chunk.toString(encoding);
+    if (typeof callback === "function") {
+      callback();
+    }
+    return true;
+  });
+  process.stderr.write = ((chunk, encoding, callback) => {
+    stderr += typeof chunk === "string" ? chunk : chunk.toString(encoding);
+    if (typeof callback === "function") {
+      callback();
+    }
+    return true;
+  });
+
+  if (cwd !== originalCwd) {
+    process.chdir(cwd);
+  }
+
+  try {
+    await main();
+    return { stdout, stderr };
+  } finally {
+    process.argv = originalArgv;
+    process.stdout.write = originalStdoutWrite;
+    process.stderr.write = originalStderrWrite;
+    if (process.cwd() !== originalCwd) {
+      process.chdir(originalCwd);
+    }
+  }
+}
 
 test("tokenize collects repeated normalized terms", () => {
   const tokens = tokenize("Hello hello README.md");
@@ -282,6 +324,85 @@ test("investigate json output files use a matching json extension", async () => 
   const writtenJson = await fs.readFile(path.join(rootDir, "report.json"), "utf8");
   assert.doesNotMatch(writtenJson, /^Using /);
   await assert.rejects(fs.readFile(requestedPath, "utf8"), { code: "ENOENT" });
+});
+
+test("investigate refresh-if-stale rebuilds a stale saved index before returning json", { concurrency: false }, async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "grounded-investigate-stale-"));
+  const notesPath = path.join(rootDir, "notes.txt");
+  await fs.writeFile(notesPath, "profile defaults live in the cli\n", "utf8");
+  const initialIndex = await buildIndex(rootDir);
+  await saveIndex(rootDir, initialIndex);
+
+  await fs.writeFile(notesPath, "profile defaults moved into the refreshed cli flow\n", "utf8");
+
+  const { stdout } = await invokeCli(["investigate", rootDir, "profile defaults", "--refresh-if-stale", "--json"], {
+    cwd: process.cwd(),
+  });
+
+  const payload = JSON.parse(stdout);
+  assert.equal(payload.source, "index");
+  assert.equal(payload.sourceMode, "index");
+  assert.equal(payload.refresh.requested, true);
+  assert.equal(payload.refresh.performed, true);
+  assert.equal(payload.refresh.mode, "if-stale");
+  assert.equal(payload.refresh.indexMode, "incremental");
+  assert.equal(payload.refresh.reason, "saved index was stale");
+  assert.equal(payload.freshness.status, "fresh");
+  assert.equal(payload.freshness.changedFiles, 0);
+  assert.equal(payload.freshness.deletedFiles, 0);
+  assert.equal(payload.freshness.newFiles, 0);
+});
+
+test("investigate live mode bypasses the saved index and reports live scan metadata", { concurrency: false }, async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "grounded-investigate-live-"));
+  const notesPath = path.join(rootDir, "notes.txt");
+  await fs.writeFile(notesPath, "profile defaults only exist in the live scan\n", "utf8");
+  const initialIndex = await buildIndex(rootDir);
+  await saveIndex(rootDir, initialIndex);
+  await fs.writeFile(notesPath, "profile defaults were updated after the saved index\n", "utf8");
+
+  const { stdout } = await invokeCli(["investigate", rootDir, "profile defaults", "--live", "--json"], {
+    cwd: process.cwd(),
+  });
+
+  const payload = JSON.parse(stdout);
+  assert.equal(payload.source, "scan");
+  assert.equal(payload.sourceMode, "live-forced");
+  assert.equal(payload.sourceReason, "forced live scan");
+  assert.equal(payload.freshness.status, "live");
+  assert.equal(payload.freshness.reason, "using a live scan");
+});
+
+test("investigate export manifest reports normalized report and metadata paths", { concurrency: false }, async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "grounded-investigate-export-"));
+  await fs.writeFile(path.join(rootDir, "notes.txt"), "profile defaults live in the cli\n", "utf8");
+
+  const reportPath = path.join(rootDir, "report");
+  const metadataPath = path.join(rootDir, "meta");
+  const { stdout } = await invokeCli(
+    [
+      "investigate",
+      rootDir,
+      "profile defaults",
+      "--output-file",
+      reportPath,
+      "--metadata-file",
+      metadataPath,
+      "--manifest-json",
+    ],
+    { cwd: process.cwd() },
+  );
+
+  const manifest = JSON.parse(stdout);
+  assert.deepEqual(manifest, {
+    report: path.join(rootDir, "report.txt"),
+    metadata: path.join(rootDir, "meta.json"),
+  });
+
+  const writtenReport = await fs.readFile(manifest.report, "utf8");
+  const writtenMetadata = JSON.parse(await fs.readFile(manifest.metadata, "utf8"));
+  assert.match(writtenReport, /^Using /);
+  assert.equal(writtenMetadata.question, "profile defaults");
 });
 
 test("deriveInvestigationQueries expands a question into focused follow-up searches", () => {
